@@ -5,20 +5,18 @@
 #include <math.h>
 #include <string.h>
 #include <esp_timer.h>
-#include <esp_pm.h>
-
+#include <esp_sleep.h>
 
 #include "deca_device_api.h"
 #include "deca_regs.h"
 #include "hardware.h"
 #include "pt.h"
 
-// #define RECEIVER
-#define TRANSMITTER
-
+#define RECEIVER
+// #define TRANSMITTER
 
 #define UWB_CONFIG {\
-    9,               /* Channel number. */\
+    5,               /* Channel number. */\
     DWT_PLEN_128,    /* Preamble length. Used in TX only. */\
     DWT_PAC8,        /* Preamble acquisition chunk size. Used in RX only. */\
     9,               /* TX preamble code. Used in TX only. */\
@@ -39,7 +37,7 @@
 #define SPEED_OF_LIGHT (299792458)
 #define POLL_EVERY (1 * 1000000ull)
 #define UUS_TO_DWT_TIME 63898
-#define RX_TX_DELAY 1000
+#define RX_TX_DELAY 4000
 
 #define MAX_DISTANCE 2
 
@@ -151,16 +149,25 @@ void app_main() {
     gpio_set_pull_mode(PIN_BUTTON_SENSE, GPIO_PULLUP_ONLY);
 
     gpio_set_direction(PIN_UWB_INTR, GPIO_MODE_INPUT);
-    gpio_set_intr_type(PIN_UWB_INTR, GPIO_INTR_POSEDGE);
-    gpio_intr_enable(PIN_UWB_INTR);
-    gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
-    gpio_isr_handler_add(PIN_UWB_INTR, rx_isr, NULL);
+    gpio_wakeup_enable(PIN_UWB_INTR, GPIO_INTR_HIGH_LEVEL);
+
 
     uint64_t last_poll = esp_timer_get_time();
     uint64_t last_poll_received = esp_timer_get_time();
     uint64_t random_delay = 0;
 
     while (1) {
+        #ifdef RECEIVER
+        set_led(0, 0, 0);
+        set_led(0, 255, 0);
+        set_led(0, 0, 0);
+        esp_sleep_enable_timer_wakeup(1000);
+        esp_light_sleep_start();
+        #else
+        esp_sleep_enable_timer_wakeup(1000);
+        esp_light_sleep_start();
+        #endif
+
         uint32_t sys_status = dwt_read32bitreg(SYS_STATUS_ID);
         if (sys_status & SYS_STATUS_RXFCG_BIT_MASK) {
             printf("rx\n");
@@ -176,7 +183,6 @@ void app_main() {
         #ifdef TRANSMITTER
         if (esp_timer_get_time() - last_poll > random_delay) {
             printf("poll\n");
-            printf("intr %d\n", lol);
             last_poll = esp_timer_get_time();
             struct uwb_poll_msg msg = {
                 .header.magic = UWB_MAGIC_WORD,
@@ -192,8 +198,29 @@ void app_main() {
         if (gpio_get_level(PIN_BUTTON_SENSE) == 0) {
             center_distance = current_distance;
         }
-        
 
+        uint8_t r,g,b;
+        if (current_distance < center_distance / 2) {
+            r = 0;
+            g = 0;
+            b = 255;
+        } else
+        if (current_distance > center_distance * 2) {
+            r = 255;
+            g = 0;
+            b = 0;
+        } else {
+            r = 0;
+            g = 0;
+            b = 0;
+        }
+
+        if (attempts > 15) {
+            r = 255;
+            g = 0;
+            b = 0;
+        }
+        set_led(r, g, b);
         #endif
     }
 }
@@ -245,8 +272,10 @@ void init_uwb() {
     #ifdef RECEIVER
     dwt_setrxtimeout(0);
     dwt_setpreambledetecttimeout(0);
+    // dwt_setrxaftertxdelay((POLL_EVERY - 2 * RX_TX_DELAY) * 0.90);
     dwt_rxenable(DWT_START_RX_IMMEDIATE);
     #else
+    dwt_setrxaftertxdelay(RX_TX_DELAY / 2);
     dwt_setrxtimeout(RX_TX_DELAY * 2);
     #endif
 }
@@ -310,6 +339,12 @@ void init_rgb() {
     ledc_channel_config(&led_channel_conf_r);
     ledc_channel_config(&led_channel_conf_g);
     ledc_channel_config(&led_channel_conf_b);
+
+    #ifdef RECEIVER
+    set_led(20, 20, 20);
+    #else
+    set_led(20, 0, 0);
+    #endif
 }
 
 static uint64_t get_tx_timestamp_u64(void)
@@ -419,17 +454,8 @@ static void uwb_parse_message() {
         printf("angle %f dist %f c %f\n", angle, distance, center_distance);
         float r, g, b;
         HSVtoRGB(&r, &g, &b, angle, 1.0, 1.0);
-        set_led(r * 255, g * 255, b * 255);
+        // set_led(r * 255, g * 255, b * 255);
         attempts = 0;
-
-        static uint8_t flip = 255;
-        #ifdef TRANSMITTER
-        set_led(255, 0, 0);
-        #else
-        set_led(125,125,215);
-        #endif
-        set_led(flip, flip, flip);
-        flip = 255 - flip;
     }  
     else {
 
