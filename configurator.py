@@ -6,13 +6,20 @@ import sys
 import struct
 
 # regular frames
-ID_HANDSHAKE = 0
-ID_WIFI = 1
-ID_NODE = 2
+ID_NACK = 0
+ID_ACK = 1
+ID_HANDSHAKE = 2
+ID_WIFI = 3
+ID_SET_NODE_ID = 4
+ID_LOGGING = 5
+ID_GET_POSITION = 6
+
 
 #beacon frames
+ID_BEACON_SET_PURPOSE = 32
+ID_GET_STATUS = 33
+ID_RETURN_STATUS = 34
 ID_BEACON_FIRMWARE = 42
-ID_BEACON_SET_POSITION = 32
 
 #telemetry frames
 ID_TELEMETRY_START_STREAMING = 32
@@ -57,11 +64,13 @@ parser.add_argument('--id', type=int,
 parser.add_argument('--wifi', nargs = 2, type=str,
                     help='--wifi [ssid] [password]')
 
-parser.add_argument('--firmware', type=str,
+parser.add_argument('--beacon-firmware', type=str,
                     help="upload a firmware file")
 
-parser.add_argument('--verify', action='store_true',
+parser.add_argument('--beacon-verify', action='store_true',
                     help="verify and apply the new firmware")
+
+parser.add_argument('--beacon-purpose', type=str, help = "repeater, origin, x, y or z")
 
 args = parser.parse_args()
 
@@ -80,17 +89,17 @@ if args.wifi:
 
 if args.id:
     print("updating node id")
-    buf = bytearray([ID_NODE, args.id])
+    buf = bytearray([ID_SET_NODE_ID, args.id])
     send(buf)
     if not wait_ack():
         print("failed to set node id")
 
 
 success = True
-if args.firmware:
+if args.beacon_firmware:
     print("updating firmware")
-    f = open(args.firmware, "rb")
-    size = os.path.getsize(args.firmware)
+    f = open(args.beacon_firmware, "rb")
+    size = os.path.getsize(args.beacon_firmware)
     send(bytearray([ID_BEACON_FIRMWARE]))
     send(struct.pack("<Q", size))
     sent = 0
@@ -105,8 +114,8 @@ if args.firmware:
         success = False
         print("failed to send update\naborting")
 
-if success and args.verify:
-    if args.firmware:
+if success and args.beacon_verify:
+    if args.beacon_firmware:
         print("upload done. attempting to verify")
         time.sleep(5)
         while True:
@@ -129,5 +138,23 @@ if success and args.verify:
         print("could not confirm the update and it will probably be rolled back")
     else:
         print("updated!")
+
+if args.beacon_purpose:
+    val = 0
+    if args.beacon_purpose == "origin":
+        val = 0
+    elif args.beacon_purpose == "x":
+        val = 1
+    elif args.beacon_purpose == "y":
+        val = 2
+    elif args.beacon_purpose == "z":
+        val = 3
+    elif args.beacon_purpose == "repeater":
+        val = 4
+    else:
+        raise Exception("invalid purpose")
+
+    send(bytearray([ID_BEACON_SET_PURPOSE]))
+    send(bytearray([val]))
 
 s.close()

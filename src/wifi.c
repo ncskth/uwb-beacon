@@ -125,11 +125,14 @@ void tcp_server_task(void *user) {
                 send(client_socket, &ack, 1, 0);
             }
 
-            if (id == 32) { // set mode
-                if (yielding_read(client_socket, &mode, 1)) {
+            if (id == 32) { // set purpose
+                if (yielding_read(client_socket, &purpose, 1)) {
                     break;
                 }
                 uint8_t ack = 1;
+                nvs_handle_t nvs;
+                ESP_ERROR_CHECK(nvs_open("storage", NVS_READWRITE, &nvs));
+                ESP_ERROR_CHECK(nvs_set_blob(nvs, "purpose", &purpose, sizeof(purpose)));
                 send(client_socket, &ack, 1, 0);
             }
 
@@ -196,7 +199,6 @@ void tcp_server_task(void *user) {
                     esp_restart();
                 }
             }
-
             vTaskDelay(10);
         }// handle client loop
     }// accept client loop
@@ -209,9 +211,10 @@ void got_ip_handler(void* handler_args, esp_event_base_t base, int32_t id, void*
         .sin_port = htons(TCP_PORT)
     };
     mdns_init();
-    char hostname[16];
+    char hostname[32];
     sprintf(hostname, "uwb_beacon%d", node_id);
     mdns_hostname_set(hostname);
+    printf("mDNS hostname: %s\n", hostname);
 
     tcp_socket = socket(AF_INET, SOCK_STREAM, 0);
     bind(tcp_socket, (struct sockaddr *)&tcpServerAddr, sizeof(tcpServerAddr));

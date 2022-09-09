@@ -19,9 +19,16 @@
 #include "deca_regs.h"
 #include "hardware.h"
 #include "pt.h"
+#include "uwb_definitions.h"
 
 #define VBAT_K ((470 + 1200) / (470))
 #define VBAT_LP_GAIN 0.9
+
+#define GREEN 0,255,0
+#define BLUE 0,0,255
+#define RED 255,0,0
+#define YELLOW 255,40,0
+#define PINK 255, 20, 20
 
 bool low_power = false;
 
@@ -30,7 +37,7 @@ uint8_t node_id;
 int32_t pos_x;
 int32_t pos_y;
 int32_t pos_z;
-uint8_t dimensions;
+uint8_t positioning_system_status;
 
 void init_rgb();
 void set_led(uint8_t r, uint8_t g, uint8_t b);
@@ -65,16 +72,17 @@ void app_main() {
     nvs_get_blob(nvs, "pos_z", &pos_z, &len);
     len = 1;
     nvs_get_blob(nvs, "purpose", &purpose, &len);
-
-    init_rgb();
-    set_led(0, 0, 255);
-    init_wifi();
-    init_uwb();
+    nvs_get_blob(nvs, "system_status", &positioning_system_status, &len);
 
     gpio_set_direction(PIN_BUTTON_SENSE, GPIO_MODE_INPUT);
     gpio_set_pull_mode(PIN_BUTTON_SENSE, GPIO_PULLUP_ONLY);
     gpio_set_level(PIN_VBAT_SENSE_GND, 0);
     gpio_set_direction(PIN_VBAT_SENSE_GND, GPIO_MODE_INPUT_OUTPUT);
+
+    init_rgb();
+    set_led(0, 0, 255);
+    init_wifi();
+    init_uwb();
 
     esp_adc_cal_characteristics_t adc_chars;
     esp_adc_cal_value_t val_type = esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_11db, ADC_WIDTH_12Bit, 1100, &adc_chars);
@@ -97,15 +105,24 @@ void app_main() {
         vbat = new_vbat * (1 - VBAT_LP_GAIN) + vbat * VBAT_LP_GAIN;
 
         if (vbat < 3.4) {
-            set_led(255, 0, 0);
+            set_led(RED);
+        } else 
+        if (positioning_system_status == UWB_SYSTEM_STATUS_GOOD) {
+            set_led(GREEN);
+        } else
+        if (positioning_system_status == UWB_SYSTEM_STATUS_CALIBRATING) {
+            set_led(YELLOW);
+        } else
+        if (positioning_system_status == UWB_SYSTEM_STATUS_ERROR) {
+            set_led(PINK);
         }
     }
 }
 
 void set_led(uint8_t r, uint8_t g, uint8_t b) {
-    ledc_set_duty(LED_SPEED_MODE, CHANNEL_LED_R, r);
-    ledc_set_duty(LED_SPEED_MODE, CHANNEL_LED_G, g);
-    ledc_set_duty(LED_SPEED_MODE, CHANNEL_LED_B, b);
+    ledc_set_duty(LED_SPEED_MODE, CHANNEL_LED_R, r / 4);
+    ledc_set_duty(LED_SPEED_MODE, CHANNEL_LED_G, g / 4);
+    ledc_set_duty(LED_SPEED_MODE, CHANNEL_LED_B, b / 4);
 
     ledc_update_duty(LED_SPEED_MODE, CHANNEL_LED_R);
     ledc_update_duty(LED_SPEED_MODE, CHANNEL_LED_G);

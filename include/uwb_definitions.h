@@ -1,10 +1,8 @@
 #include <stdint.h>
 
 #define UWB_BROADCAST_ID 0xff
-
 #define UWB_MAGIC_WORD "cskth"
-
-#define BROADCAST_RESPONSE_SLOT 10000 // 10ms
+#define BROADCAST_RESPONSE_SLOT_MS 10 // 10ms
 
 #define UWB_CONFIG {\
     9,               /* Channel number. */\
@@ -12,7 +10,7 @@
     DWT_PAC8,        /* Preamble acquisition chunk size. Used in RX only. */\
     9,               /* TX preamble code. Used in TX only. */\
     9,               /* RX preamble code. Used in RX only. */\
-    1,               /* 0 to use standard 8 symbol SFD, 1 to use non-standard 8 symbol, 2 for non-standard 16 symbol SFD and 3 for 4z 8 symbol SDF type */\
+    2,               /* 0 to use standard 8 symbol SFD, 1 to use non-standard 8 symbol, 2 for non-standard 16 symbol SFD and 3 for 4z 8 symbol SDF type */\
     DWT_BR_6M8,      /* Data rate. */\
     DWT_PHRMODE_STD, /* PHY header mode. */\
     DWT_PHRRATE_STD, /* PHY header rate. */\
@@ -26,14 +24,17 @@
 #define UWB_HAS_2D_POSITION_BITMASK (1 << 1)
 #define UWB_IS_ANCHOR_BITMASK (1 << 2)
 
+#define GET_BROADCAST_WAIT_MS(id) (BROADCAST_RESPONSE_SLOT_MS * 1.5 + BROADCAST_RESPONSE_SLOT_MS * id)
+#define BROADCAST_BUSY_FOR_MS (BROADCAST_RESPONSE_SLOT_MS * 257.5)
+#define SINGLE_BUSY_FOR_MS (1) //or until it has gotten a response
+
 enum uwb_msg_types {
     UWB_MSG_POLL_RANGING,
     UWB_MSG_RESPONSE_RANGING,
-    UWB_MSG_RESPONSE_RANGING_POSITION,
-    UWB_MSG_CALIBRATE_BEACONS,
     UWB_MSG_POLL_ALIVE,
     UWB_MSG_IS_ALIVE,
-    UWB_MSG_GIVE_WORD
+    UWB_MSG_GIVE_WORD,
+    UWB_MSG_SYSTEM_STATUS
 };
 
 enum uwb_purposes {
@@ -42,8 +43,15 @@ enum uwb_purposes {
     UWB_PURPOSE_BEACON_Y,
     UWB_PURPOSE_BEACON_Z,
     UWB_PURPOSE_BEACON_REPEATER,
-    UWB_PURPOSE_USER
-}
+    UWB_PURPOSE_BEACON_DYNAMIC,
+    UWB_PURPOSE_USER,
+};
+
+enum uwb_system_status {
+    UWB_SYSTEM_STATUS_CALIBRATING,
+    UWB_SYSTEM_STATUS_ERROR,
+    UWB_SYSTEM_STATUS_GOOD,
+};
 
 #pragma pack(1)
 struct uwb_header {
@@ -55,19 +63,12 @@ struct uwb_header {
 };
 
 #pragma pack(1)
-struct uwb_poll_msg {
+struct uwb_poll_ranging {
     struct uwb_header header;
 };
 
 #pragma pack(1)
-struct uwb_response_msg {
-    struct uwb_header header;
-    uint32_t rx_timestamp;
-    uint32_t tx_timestamp;
-};
-
-#pragma pack(1)
-struct uwb_response_ranging_position {
+struct uwb_response_ranging {
     struct uwb_header header;
     uint32_t rx_timestamp;
     uint32_t tx_timestamp;
@@ -79,14 +80,7 @@ struct uwb_response_ranging_position {
 };
 
 #pragma pack(1)
-struct uwb_query_metadata {
-    struct uwb_header header;
-    uint8_t num_beacons;
-    uint8_t num_users;
-};
-
-#pragma pack(1)
-struct uwb_calibrate_beacons {
+struct uwb_poll_alive {
     struct uwb_header header;
 };
 
@@ -100,4 +94,10 @@ struct uwb_is_alive {
 struct uwb_give_word {
     struct uwb_header header;
     uint32_t duration;   
+};
+
+#pragma pack(1)
+struct uwb_system_status_msg {
+    struct uwb_header header;
+    uint8_t status;
 };
