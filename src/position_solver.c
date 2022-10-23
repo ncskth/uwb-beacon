@@ -7,16 +7,14 @@
 #define ITERATIONS 15
 
 //gauss-newton but with for loops instead of matrices (i think)
-void solve_for_position(struct distance_measurement *distances, uint8_t index, struct pos_solver_position* current_pos, uint8_t* fix_type) {
+void solve_for_position(struct distance_measurement *distances, uint8_t index, struct pos_solver_position* current_pos, uint8_t* fix_type, uint8_t ignore_status) {
     //read metadata
-    printf("\n\n----------------------------------\n\n\n");
     uint8_t num_useful_nodes = 0;
     for (uint8_t i = 0; i < index; i++) {
         uint8_t flags = distances[i].flags;
-        if (flags & UWB_HAS_3D_POSITION_BITMASK) {
+        if (flags & UWB_HAS_3D_POSITION_BITMASK || ignore_status) {
             num_useful_nodes++;
         }
-        printf("node: %d distance: %f %f %f %f\n", distances[i].id, distances[i].distance / 1000.0, distances[i].position_x / 1000.0, distances[i].position_y / 1000.0, distances[i].position_z / 1000.0);
     }
 
     if (num_useful_nodes >= 4) {
@@ -34,7 +32,7 @@ void solve_for_position(struct distance_measurement *distances, uint8_t index, s
         step.z = 0.0;
 
         for (uint8_t j = 0; j < index; j++) {
-            if (!(distances[j].flags & UWB_HAS_3D_POSITION_BITMASK)) {
+            if (!(distances[j].flags & UWB_HAS_3D_POSITION_BITMASK || ignore_status)) {
                 continue;
             }
             struct pos_solver_position difference;
@@ -62,7 +60,6 @@ void solve_for_position(struct distance_measurement *distances, uint8_t index, s
     
     float error = sqrtf(step.x * step.x + step.y * step.y + step.z * step.z);
     //algorithm is unstable
-    printf("xx%f %f %f %f\n", current_pos->x, current_pos->y, current_pos->x, error);
     if (error > 0.2) {
         *fix_type = 0;
     }

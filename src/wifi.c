@@ -74,7 +74,7 @@ void tcp_server_task(void *user) {
     while (1) {
         vTaskDelay(10);
         if (!wifi_connected) {
-            printf("no wifi\n");
+            // printf("no wifi\n");
             vTaskDelay(100);
             continue;
         }
@@ -82,7 +82,7 @@ void tcp_server_task(void *user) {
         client_socket = accept(tcp_socket,(struct sockaddr *)&remote_addr, &socklen);
         
         if (client_socket < 0) {
-            printf("no client\n");
+            // printf("no client\n");
             vTaskDelay(100);
             continue;
         }
@@ -185,7 +185,6 @@ void tcp_server_task(void *user) {
                         }
                         written += to_read;
                         esp_ota_write(ota_handle, rx_buf, to_read);
-                        
                     }
                     if (stop) {
                         break;

@@ -22,6 +22,9 @@
 
 #define MIN_TRX_DELAY 700
 
+#define TIME_TO_INACTIVE_US 10000000
+#define INACTIVE_POLL_PERIOD_MS 300
+
 static void send_message_delayed(uint8_t* buf, uint8_t len, uint64_t ts);
 static void send_message_global(uint8_t* buf, uint8_t len);
 static void send_message_instantly(uint8_t* buf, uint8_t len);
@@ -42,11 +45,11 @@ volatile uint64_t message_received = 0;
 
 volatile uint8_t origin_beacon_id;
 volatile uint8_t x_beacon_id;
-
 volatile uint8_t y_beacon_id;
 volatile uint8_t z_beacon_id;
 volatile uint8_t repeater_beacon_ids[32];
 volatile uint8_t repeater_beacon_ids_index = 0;
+volatile uint64_t uwb_last_message_received_at = 0;
 
 TaskHandle_t uwb_misc_task_handle;
 TaskHandle_t uwb_send_task_handle;
@@ -61,6 +64,20 @@ IRAM_ATTR void uwb_irq(TaskHandle_t *uwb_task) {
     int has_awoken;
     vTaskNotifyGiveFromISR(*uwb_task, &has_awoken);
     portYIELD_FROM_ISR(has_awoken);
+}
+
+uint64_t get_uwb_last_message_received_at() {
+    return uwb_last_message_received_at;
+}
+
+void uwb_enter_sleep() {
+    xSemaphoreTake(uwb_mutex, portMAX_DELAY);
+
+    uint16_t sleep_config = DWT_SLP_EN | DWT_SLEEP;
+    uint16_t sleep_wake = DWT_WAKE_CSN;
+
+    dwt_configuresleep(sleep_config, sleep_wake);
+    dwt_entersleep(0);
 }
 
 void init_uwb() {
@@ -158,7 +175,6 @@ void uwb_reading_task() {
         } else {
 
         }
-        xTaskNotify(uwb_misc_task_handle, 0, 0);
     }
 }
 
@@ -167,7 +183,6 @@ void uwb_send_task() {
         xTaskNotifyWait(0, 0, NULL, portMAX_DELAY);
         vTaskDelay(GET_BROADCAST_WAIT_MS(node_id));
         send_message_instantly(uwb_send_task_buf, uwb_send_task_len);
-        printf("sent globally %.*s\n", uwb_send_task_len, uwb_send_task_buf);
     }
 }
 
@@ -182,6 +197,7 @@ void change_system_status(uint8_t system_status, uint8_t send) {
             .header.msg_type = UWB_MSG_SYSTEM_STATUS,
             .header.receiver = UWB_BROADCAST_ID,
             .header.sender = node_id,
+            .header.purpose = purpose,
             .status = system_status,
         };
         send_message_instantly(&msg, sizeof(msg));
@@ -191,21 +207,46 @@ void change_system_status(uint8_t system_status, uint8_t send) {
 void uwb_misc_task() {
     uint8_t had_word = 0;
 
+    //interrupting at boot sould be fine
+    struct uwb_poll_alive poll_msg = {
+        .header.magic = UWB_MAGIC_WORD,
+        .header.msg_type = UWB_MSG_POLL_ALIVE,
+        .header.receiver = UWB_BROADCAST_ID,
+        .header.sender = node_id,
+        .header.purpose = purpose,
+    };
+    send_message_instantly(&poll_msg, sizeof(poll_msg));
+
+    struct uwb_is_alive self_response_msg = {
+        .header.magic = UWB_MAGIC_WORD,
+        .header.msg_type = UWB_MSG_IS_ALIVE,
+        .header.sender = node_id,
+        .header.receiver = UWB_BROADCAST_ID,
+        .header.purpose = purpose,
+    };
+    send_message_global(&self_response_msg, sizeof(self_response_msg));
+    vTaskDelay(BROADCAST_BUSY_FOR_MS);
+
     while (true) {
+        if (purpose == UWB_PURPOSE_BEACON_PASSIVE) {
+            vTaskDelay(100);
+            continue;
+        }
         if (gpio_get_level(PIN_BUTTON_SENSE) == 0) {
             vTaskDelay(500);
             change_system_status(UWB_SYSTEM_STATUS_CALIBRATING, true);
         }
 
         //when given word (x, y, z)
-        if (esp_timer_get_time() < has_word_until && purpose != UWB_PURPOSE_BEACON_REPEATER) {
+        if (esp_timer_get_time() < has_word_until && (purpose == UWB_PURPOSE_BEACON_X ||
+            purpose == UWB_PURPOSE_BEACON_Y || purpose == UWB_PURPOSE_BEACON_Z)) {
             if (!had_word) {
                 pos_x = 0;
                 pos_y = 0;
                 pos_z = 0;
             }
             had_word = 1;
-            printf("has word non repeater\n");
+            printf("has word non oxyz beacon\n");
             //poll fast
             struct uwb_poll_ranging msg = {
                 .header.magic = UWB_MAGIC_WORD,
@@ -215,7 +256,7 @@ void uwb_misc_task() {
             };
             send_message_instantly(&msg, sizeof(msg));
             xTaskNotifyWait(0, 0, NULL, SINGLE_BUSY_FOR_MS);
-            int32_t *p_pos = NULL;
+            float *p_pos = NULL;
             if (distance_measurements_index == 0) {
                 continue;
             }
@@ -229,12 +270,14 @@ void uwb_misc_task() {
             if (purpose == UWB_PURPOSE_BEACON_Z) {
                 p_pos = &pos_z; 
             }
-            if (*p_pos == 0) {
+
+            if (!had_word) {
                 *p_pos = distance_measurements[0].distance;
             }
-            *p_pos = (distance_measurements[0].distance * 10 + *p_pos * 90) / 100;
-            printf("distance %d %d\n", *p_pos, distance_measurements[0].distance);
+            
+            *p_pos = distance_measurements[0].distance / 1000.0 * 0.01 + *p_pos * 0.99;
             distance_measurements_index = 0;
+            printf("pos %f %f\n", distance_measurements[0].distance / 1000.0, *p_pos);
         }
 
         //when given word (repeater)
@@ -252,6 +295,7 @@ void uwb_misc_task() {
                 .header.msg_type = UWB_MSG_POLL_RANGING,
                 .header.receiver = origin_beacon_id,
                 .header.sender = node_id,
+                .header.purpose = purpose,
             };
             send_message_instantly(&msg, sizeof(msg));
             // xTaskNotifyWait(0, 0, NULL, SINGLE_BUSY_FOR_MS);
@@ -272,26 +316,32 @@ void uwb_misc_task() {
             // xTaskNotifyWait(0, 0, NULL, SINGLE_BUSY_FOR_MS);
             vTaskDelay(SINGLE_BUSY_FOR_MS);
 
-            struct pos_solver_position pos = {pos_x / 1000.0, pos_y / 1000.0, pos_z / 1000.0,};
+            struct pos_solver_position pos = {pos_x, pos_y, pos_z};
             uint8_t fix;
-            solve_for_position(distance_measurements, distance_measurements_index, &pos, &fix);
+            solve_for_position(distance_measurements, distance_measurements_index, &pos, &fix, true);
             distance_measurements_index = 0;
-            if (pos_x == 0 && pos_y == 0 && pos_z == 0) {
-                pos_x = pos.x;
-                pos_y = pos.y;
-                pos_z = pos.z;
-            }
             if (fix == 3) {
-                pos_x = (pos.x * 1000 * 20 + pos_x * 80) / 100;
-                pos_y = (pos.y * 1000 * 20 + pos_y * 80) / 100;
-                pos_z = (pos.z * 1000 * 20 + pos_z * 80) / 100;
-                printf("pos %f %f %f %f %f %f\n", pos_x / 1000.0, pos_y / 1000.0, pos_z / 1000.0, pos.x, pos.y, pos.z);
+                if (!had_word) {
+                    pos_x = pos.x;
+                    pos_y = pos.y;
+                    pos_z = pos.z;
+                }
+                pos_x = pos_x * 0.95 + 0.05 * pos.x;
+                pos_y = pos_y * 0.95 + 0.05 * pos.y;
+                pos_z = pos_z * 0.95 + 0.05 * pos.z;
+                printf("pos %f %f %f %f %f %f\n", pos.x, pos.y, pos.z, pos_x, pos_y, pos_z);
             }
         }
 
+        //print final result of having the word
         if (esp_timer_get_time() > has_word_until && had_word) {
             had_word = 0;
-            printf("calibrated position %f %f %f\n", pos_x / 1000.0, pos_y / 1000.0, pos_z / 1000.0);
+            printf("calibrated position %f %f %f\n", pos_x, pos_y, pos_z);
+            nvs_handle_t nvs;
+            ESP_ERROR_CHECK(nvs_open("storage", NVS_READWRITE, &nvs));
+            ESP_ERROR_CHECK(nvs_set_blob(nvs, "pos_x", &pos_x, sizeof(pos_x)));
+            ESP_ERROR_CHECK(nvs_set_blob(nvs, "pos_y", &pos_y, sizeof(pos_y)));
+            ESP_ERROR_CHECK(nvs_set_blob(nvs, "pos_z", &pos_z, sizeof(pos_z)));
         }
 
         //the calibration process
@@ -309,6 +359,7 @@ void uwb_misc_task() {
                 .header.msg_type = UWB_MSG_POLL_ALIVE,
                 .header.receiver = UWB_BROADCAST_ID,
                 .header.sender = node_id,
+                .header.purpose = purpose,
             };
             printf("poll alive\n");
             send_message_instantly(&msg, sizeof(msg));
@@ -317,7 +368,7 @@ void uwb_misc_task() {
                 .header.msg_type = UWB_MSG_IS_ALIVE,
                 .header.sender = node_id,
                 .header.receiver = UWB_BROADCAST_ID,
-                .purpose = purpose,
+                .header.purpose = purpose,
             };
             send_message_global(&tx_msg, sizeof(tx_msg));
             vTaskDelay(BROADCAST_BUSY_FOR_MS);
@@ -328,25 +379,25 @@ void uwb_misc_task() {
                 continue;
             }
 
-            printf("give word x %d\n", x_beacon_id);
-            //give word x
             struct uwb_give_word word_msg = {
                 .header.magic = UWB_MAGIC_WORD,
                 .header.msg_type = UWB_MSG_GIVE_WORD,
                 .header.receiver = x_beacon_id,
                 .header.sender = node_id,
+                .header.purpose = purpose,
                 .duration = 10000,
             };
+
+            printf("give word x %d\n", x_beacon_id);
+            word_msg.header.receiver = x_beacon_id;
             send_message_instantly(&word_msg, sizeof(word_msg));
             vTaskDelay(11000);
 
-            //give word y
             printf("give word y %d\n", y_beacon_id);
             word_msg.header.receiver = y_beacon_id;
             send_message_instantly(&word_msg, sizeof(word_msg));
             vTaskDelay(11000);
-            
-            //give word z
+
             printf("give word z %d\n", z_beacon_id);
             word_msg.header.receiver = z_beacon_id;
             send_message_instantly(&word_msg, sizeof(word_msg));
@@ -363,31 +414,31 @@ void uwb_misc_task() {
             printf("calibration done\n");
             change_system_status(UWB_SYSTEM_STATUS_GOOD, true);
         }
+
+        if (esp_timer_get_time() - uwb_last_message_received_at > TIME_TO_INACTIVE_US) {
+
+        }
     }
 }
 
-static uint64_t get_tx_timestamp_u64(void)
-{
+static uint64_t get_tx_timestamp_u64(void) {
     uint8_t ts_tab[5];
     uint64_t ts = 0;
     int8_t i;
     dwt_readtxtimestamp(ts_tab);
-    for (i = 4; i >= 0; i--)
-    {
+    for (i = 4; i >= 0; i--) {
         ts <<= 8;
         ts |= ts_tab[i];
     }
     return ts;
 }
 
-static uint64_t get_rx_timestamp_u64(void)
-{
+static uint64_t get_rx_timestamp_u64(void) {
     uint8_t ts_tab[5];
     uint64_t ts = 0;
     int8_t i;
     dwt_readrxtimestamp(ts_tab);
-    for (i = 4; i >= 0; i--)
-    {
+    for (i = 4; i >= 0; i--) {
         ts <<= 8;
         ts |= ts_tab[i];
     }
@@ -450,6 +501,7 @@ static void send_message_global(uint8_t* buf, uint8_t len) {
 }
 
 static void uwb_parse_message() {
+    uwb_last_message_received_at = esp_timer_get_time();
     uint8_t rx_buf[64];
     xSemaphoreTake(uwb_mutex, portMAX_DELAY);
     uint32_t length = dwt_read32bitreg(RX_FINFO_ID) & RX_BUFFER_MAX_LEN;
@@ -470,11 +522,67 @@ static void uwb_parse_message() {
     if (header->receiver != node_id && header->receiver != UWB_BROADCAST_ID) {
         return;
     }
+    //update active nodes
+    // I don't care about users
+    // if (header->purpose == UWB_PURPOSE_USER) {
+    //     uint8_t exists = 0;
+    //     for (uint8_t i = 0; i < user_node_ids_index; i++) {
+    //         if (user_node_ids[i] == header->sender) {
+    //             exists = 1;
+    //             break;
+    //         }
+    //     }
+    //     if (exists == 0) {
+    //         user_node_ids[user_node_ids_index] = header->sender;
+    //         user_node_ids_index++;
+    //         printf("registered %d as user\n", header->sender);
+    //     }
+    // }
+    if (header->purpose == UWB_PURPOSE_BEACON_X) {
+        x_beacon_id = header->sender;
+        if (x_beacon_id != header->sender) {
+            printf("registered %d as x\n", header->sender);
+        }
+    }
+    if (header->purpose == UWB_PURPOSE_BEACON_Y) {
+        y_beacon_id = header->sender;
+        if (y_beacon_id != header->sender) {
+            printf("registered %d as y\n", header->sender);
+        }
+    }
+    if (header->purpose == UWB_PURPOSE_BEACON_Z) {
+        z_beacon_id = header->sender;
+        if (z_beacon_id != header->sender) {
+            printf("registered %d as z\n", header->sender);
+        }
+    }
+    if (header->purpose == UWB_PURPOSE_BEACON_ORIGIN) {
+        origin_beacon_id = header->sender;
+        if (origin_beacon_id != header->sender) {
+            printf("registered %d as origin\n", header->sender);
+        }
+    }
+    if (header->purpose == UWB_PURPOSE_BEACON_REPEATER) {
+        uint8_t exists = 0;
+        for (uint8_t i = 0; i < repeater_beacon_ids_index; i++) {
+            if (repeater_beacon_ids[i] == header->sender) {
+                exists = 1;
+                break;
+            }
+        }
+        if (exists == 0) {
+            repeater_beacon_ids[repeater_beacon_ids_index] = header->sender;
+            repeater_beacon_ids_index++;
+            printf("registered %d as repeater\n", header->sender);
+        }
+    }
+
+    set_led(WHITE);
     if (header->msg_type == UWB_MSG_POLL_RANGING) {
         uint8_t flags = 0;
-        // if (positioning_system_status == UWB_SYSTEM_STATUS_GOOD) {
-        flags |= UWB_HAS_3D_POSITION_BITMASK;
-        // }
+        if (positioning_system_status == UWB_SYSTEM_STATUS_GOOD && purpose != UWB_PURPOSE_BEACON_PASSIVE) {
+            flags |= UWB_HAS_3D_POSITION_BITMASK;
+        }
         flags |= UWB_IS_ANCHOR_BITMASK;
 
         uint64_t poll_rx_ts = get_rx_timestamp_u64();
@@ -485,12 +593,13 @@ static void uwb_parse_message() {
             .header.msg_type = UWB_MSG_RESPONSE_RANGING,
             .header.sender = node_id,
             .header.receiver = header->sender,
+            .header.purpose = purpose,
             .rx_timestamp = poll_rx_ts,
             .tx_timestamp = resp_tx_ts,
             .flags = flags,
-            .position_x = pos_x,
-            .position_y = pos_y,
-            .position_z = pos_z,
+            .position_x = pos_x * 1000,
+            .position_y = pos_y * 1000,
+            .position_z = pos_z * 1000,
         };
         send_message_delayed(&tx_msg, sizeof(tx_msg), resp_tx_time);
     } else
@@ -528,27 +637,8 @@ static void uwb_parse_message() {
     } else 
     if (header->msg_type == UWB_MSG_IS_ALIVE) {
         struct uwb_is_alive *rx_msg = (struct uwb_is_alive*) rx_buf;
-        printf("lolcat %d %d\n", rx_msg->header.sender, rx_msg->purpose);
-        if (rx_msg->purpose == UWB_PURPOSE_BEACON_X) {
-            x_beacon_id = rx_msg->header.sender;
-        }
-        if (rx_msg->purpose == UWB_PURPOSE_BEACON_Y) {
-            y_beacon_id = rx_msg->header.sender;
-        }
-        if (rx_msg->purpose == UWB_PURPOSE_BEACON_Z) {
-            z_beacon_id = rx_msg->header.sender;
-        }
-        if (rx_msg->purpose == UWB_PURPOSE_BEACON_ORIGIN) {
-            origin_beacon_id = rx_msg->header.sender;
-        }
-        if (rx_msg->purpose == UWB_PURPOSE_BEACON_REPEATER) {
-            repeater_beacon_ids[repeater_beacon_ids_index] = rx_msg->header.sender;
-            repeater_beacon_ids_index++;
-        }
-        if (rx_msg->purpose == UWB_PURPOSE_USER) {
-            user_node_ids[user_node_ids_index] = rx_msg->header.sender;
-            user_node_ids_index++;
-        }
+
+        
     } else
     if (header->msg_type == UWB_MSG_POLL_ALIVE) {
         struct uwb_is_alive tx_msg = {
@@ -556,7 +646,7 @@ static void uwb_parse_message() {
             .header.msg_type = UWB_MSG_IS_ALIVE,
             .header.sender = node_id,
             .header.receiver = UWB_BROADCAST_ID,
-            .purpose = purpose,
+            .header.purpose = purpose,
         };
         send_message_global(&tx_msg, sizeof(tx_msg));
     } else
@@ -567,6 +657,8 @@ static void uwb_parse_message() {
     } else
     if (header->msg_type == UWB_MSG_SYSTEM_STATUS) {
         struct uwb_system_status_msg *rx_msg = (struct uwb_system_status_msg*) rx_buf;
-        change_system_status(rx_msg->status, false);
+        if (purpose != UWB_PURPOSE_BEACON_PASSIVE) {
+            change_system_status(rx_msg->status, false);
+        }
     }
 }
